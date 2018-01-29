@@ -1,9 +1,9 @@
 
-use time::{Duration, PreciseTime};
+use time::PreciseTime;
 use channel;
 use connection::Connection;
 use protocol;
-use amq_proto::{self, Table, Method, Frame, MethodFrame};
+use amq_proto::{self, Table, Method, Frame, MethodFrame, FrameType, FramePayload};
 use amq_proto::TableEntry::{FieldTable, Bool, LongString};
 
 use amqp_error::{AMQPResult, AMQPError};
@@ -15,6 +15,7 @@ use std::default::Default;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
+use std::time::Duration;
 use std::thread;
 use std::cmp;
 
@@ -46,6 +47,7 @@ pub struct Options {
     pub vhost: String,
     pub frame_max_limit: u32,
     pub channel_max_limit: u16,
+    pub heartbeat: u16,
     pub locale: String,
     pub scheme: AMQPScheme,
 }
@@ -60,6 +62,7 @@ impl Default for Options {
             password: "guest".to_string(),
             frame_max_limit: 131072,
             channel_max_limit: 65535,
+            heartbeat: 30,
             locale: "en_US".to_string(),
             scheme: AMQPScheme::AMQP,
         }
@@ -70,6 +73,7 @@ pub struct Session {
     channels: Arc<Mutex<HashMap<u16, SyncSender<AMQPResult<Frame>>>>>,
     send_sender: SyncSender<EventFrame>,
     channel_max_limit: u16,
+    heartbeat: u16,
     channel_zero: channel::Channel,
 }
 
@@ -110,14 +114,27 @@ impl Session {
         try!(channels.lock().map_err(|_| AMQPError::SyncError)).insert(0, channel_zero_sender);
         let channels_clone = channels.clone();
         thread::spawn(|| Session::reading_loop(connection, channels_clone, send_receiver));
+
         let mut session = Session {
             channels: channels,
             send_sender: send_sender,
             channel_max_limit: 65535,
+            heartbeat: 15,
             channel_zero: channel_zero,
         };
 
         try!(session.init(options));
+
+
+        {
+            let sender = session.send_sender.clone();
+            let hb = Duration::from_secs(session.heartbeat.clone() as u64);
+            thread::spawn(move || Session::heartbeat_loop(
+                sender,
+                hb
+            ));
+        }
+
         Ok(session)
     }
 
@@ -178,13 +195,14 @@ impl Session {
         debug!("Received tune request: {:?}", tune);
 
         self.channel_max_limit = negotiate(tune.channel_max, self.channel_max_limit);
+        self.heartbeat = negotiate(tune.heartbeat, self.heartbeat);
         let frame_max_limit = negotiate(tune.frame_max, options.frame_max_limit);
         self.channel_zero.set_frame_max_limit(frame_max_limit);
 
         let tune_ok = protocol::connection::TuneOk {
             channel_max: self.channel_max_limit,
             frame_max: frame_max_limit,
-            heartbeat: 0,
+            heartbeat: self.heartbeat,
         };
         debug!("Sending connection.tune-ok: {:?}", tune_ok);
         try!(self.channel_zero.send_method_frame(&tune_ok));
@@ -251,6 +269,21 @@ impl Session {
             .unwrap();
     }
 
+    fn heartbeat_loop(
+        chan: SyncSender<EventFrame>,
+        delay: Duration
+    ) -> () {
+        loop {
+            thread::sleep(delay);
+            trace!("Sending heartbeat");
+            chan.send(EventFrame::Frame(Frame {
+                frame_type: FrameType::HEARTBEAT,
+                channel: 0,
+                payload: FramePayload::new(vec![]),
+            })).unwrap();
+        }
+    }
+
     // Receives and dispatches frames from the connection to the corresponding
     // channels.
     fn reading_loop(mut connection: Connection,
@@ -260,7 +293,6 @@ impl Session {
                     -> () {
         debug!("Starting reading loop");
         loop {
-            // thread::sleep(time::Duration::from_secs(1));
             trace!("Start of the read loop");
             let mut sent = 0;
             while sent < 100 {
@@ -296,10 +328,17 @@ impl Session {
                     let chan_id = frame.channel;
 
                     if chan_id == 0 {
-                        info!(
-                            "Dropping frame to channel 0: {:?}",
-                            String::from_utf8_lossy(frame.payload.inner())
-                        );
+                        match frame.frame_type {
+                            FrameType::HEARTBEAT => {
+                                debug!("Received heartbeat");
+                            },
+                            _ => {
+                                info!(
+                                    "Dropping frame to channel 0: {:?}",
+                                    String::from_utf8_lossy(frame.payload.inner())
+                                );
+                            }
+                        }
                     }
 
                     let target = chans.get(&chan_id);
@@ -472,5 +511,6 @@ mod test {
         assert_eq!(options.login, "guest");
         assert_eq!(options.password, "guest");
         assert_eq!(options.port, 5672);
+        assert_eq!(options.heartbeat, 30);
     }
 }
