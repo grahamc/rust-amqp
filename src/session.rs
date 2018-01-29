@@ -62,7 +62,7 @@ impl Default for Options {
             password: "guest".to_string(),
             frame_max_limit: 131072,
             channel_max_limit: 65535,
-            heartbeat: 30,
+            heartbeat: 15,
             locale: "en_US".to_string(),
             scheme: AMQPScheme::AMQP,
         }
@@ -119,7 +119,7 @@ impl Session {
             channels: channels,
             send_sender: send_sender,
             channel_max_limit: 65535,
-            heartbeat: 15,
+            heartbeat: options.heartbeat,
             channel_zero: channel_zero,
         };
 
@@ -326,45 +326,50 @@ impl Session {
                     // then reply code 503 (command invalid).
                     let chans = channels.lock().unwrap();
                     let chan_id = frame.channel;
+                    let target = chans.get(&chan_id);
+
+                    let mut forward = true;
 
                     if chan_id == 0 {
                         match frame.frame_type {
                             FrameType::HEARTBEAT => {
                                 debug!("Received heartbeat");
+                                forward = false;
                             },
                             _ => {
                                 info!(
-                                    "Dropping frame to channel 0: {:?}",
+                                    "Frame to channel 0: {:?}",
                                     String::from_utf8_lossy(frame.payload.inner())
                                 );
                             }
                         }
                     }
 
-                    let target = chans.get(&chan_id);
 
                     match target {
                         Some(target_channel) => {
-                            match target_channel.try_send(Ok(frame)) {
-                                Ok(()) => {},
-                                Err(TrySendError::Disconnected(frame)) => {
-                                    warn!(
-                                        "Error dispatching packet to channel {}: Receiver is gone.",
-                                        &chan_id
-                                    );
-                                },
-                                Err(TrySendError::Full(frame)) => {
-                                    warn!(
-                                        "Error dispatching packet to channel {}: Full! Blocking until there is space.",
-                                        &chan_id
-                                    );
-
-                                    if let Err(err) = target_channel.send(frame) {
+                            if forward {
+                                match target_channel.try_send(Ok(frame)) {
+                                    Ok(()) => {},
+                                    Err(TrySendError::Disconnected(frame)) => {
                                         warn!(
-                                            "Error dispatching packet to channel {}, Even after waiting for a blocked write: {:?}",
-                                            &chan_id,
-                                            err
+                                            "Error dispatching packet to channel {}: Receiver is gone.",
+                                            &chan_id
                                         );
+                                    },
+                                    Err(TrySendError::Full(frame)) => {
+                                        warn!(
+                                            "Error dispatching packet to channel {}: Full! Blocking until there is space.",
+                                            &chan_id
+                                        );
+
+                                        if let Err(err) = target_channel.send(frame) {
+                                            warn!(
+                                                "Error dispatching packet to channel {}, Even after waiting for a blocked write: {:?}",
+                                                &chan_id,
+                                                err
+                                            );
+                                        }
                                     }
                                 }
                             }
