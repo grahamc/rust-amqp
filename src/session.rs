@@ -199,7 +199,7 @@ impl Session {
             .rpc::<_, protocol::connection::OpenOk>(&open, "connection.open-ok");
         match open_ok {
             Ok(_) => {
-                debug!("Connection initialized. conneciton.open-ok recieved");
+                debug!("Connection initialized. connection.open-ok received");
                 info!("Session initialized");
                 Ok(())
             }
