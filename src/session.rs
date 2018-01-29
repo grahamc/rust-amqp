@@ -527,6 +527,6 @@ mod test {
         assert_eq!(options.login, "guest");
         assert_eq!(options.password, "guest");
         assert_eq!(options.port, 5672);
-        assert_eq!(options.heartbeat, 30);
+        assert_eq!(options.heartbeat, 15);
     }
 }
