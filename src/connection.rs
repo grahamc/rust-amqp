@@ -40,6 +40,7 @@ impl Connection {
 
     pub fn open(host: &str, port: u16) -> AMQPResult<Connection> {
         let mut socket = try!(TcpStream::connect((host, port)));
+        socket.set_read_timeout(Some(time::Duration::from_millis(250)));
         try!(init_connection(&mut socket));
         Ok(Connection {
             socket: AMQPStream::Cleartext(socket),
@@ -73,7 +74,19 @@ impl Connection {
     pub fn read(&mut self) -> AMQPResult<Frame> {
         match self.socket {
             AMQPStream::Cleartext(ref mut stream) => {
-                Frame::decode(stream).map_err(From::from)
+                match Frame::decode(stream) {
+                    Ok(e) => Ok(e),
+
+                    Err(amq_proto::Error(
+                        amq_proto::ErrorKind::Io(e),
+                        _
+                    )) => Err(AMQPError::IoError(e.kind())),
+
+                    Err(e) => {
+                        println!("Mystery err!!! {:?}", e);
+                        Err(e).map_err(From::from)
+                    }
+                }
             },
             #[cfg(feature = "tls")]
             AMQPStream::Tls(ref mut stream) => {
