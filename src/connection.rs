@@ -26,12 +26,12 @@ impl Connection {
     #[cfg(feature = "tls")]
     pub fn open_tls(host: &str, port: u16) -> AMQPResult<Connection> {
         let socket = try!(TcpStream::connect((host, port)));
-        socket.set_read_timeout(Some(time::Duration::from_millis(250)));
         let connector = SslConnectorBuilder::new(SslMethod::tls()).unwrap().build();
 
         let mut tls_socket = try!(connector.connect(host, socket));
 
         try!(init_connection(&mut tls_socket));
+        socket.set_read_timeout(Some(time::Duration::from_millis(250)));
         Ok(Connection {
             socket: AMQPStream::Tls(tls_socket),
             frame_max_limit: 131072,
@@ -40,8 +40,8 @@ impl Connection {
 
     pub fn open(host: &str, port: u16) -> AMQPResult<Connection> {
         let mut socket = try!(TcpStream::connect((host, port)));
-        socket.set_read_timeout(Some(time::Duration::from_millis(250)));
         try!(init_connection(&mut socket));
+        socket.set_read_timeout(Some(time::Duration::from_millis(250)));
         Ok(Connection {
             socket: AMQPStream::Cleartext(socket),
             frame_max_limit: 131072,
