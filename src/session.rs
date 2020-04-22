@@ -76,6 +76,7 @@ pub struct Session {
     send_sender: SyncSender<EventFrame>,
     channel_max_limit: u16,
     heartbeat: u16,
+    heartbeat_thread: Option<thread::JoinHandle<Result<(), ()>>>,
     channel_zero: channel::Channel,
 }
 
@@ -122,6 +123,7 @@ impl Session {
             send_sender: send_sender,
             channel_max_limit: 65535,
             heartbeat: options.heartbeat,
+            heartbeat_thread: None,
             channel_zero: channel_zero,
         };
 
@@ -131,10 +133,10 @@ impl Session {
         {
             let sender = session.send_sender.clone();
             let hb = Duration::from_secs(session.heartbeat.clone() as u64);
-            thread::spawn(move || Session::heartbeat_loop(
+            session.heartbeat_thread = Some(thread::spawn(move || Session::heartbeat_loop(
                 sender,
                 hb
-            ));
+            )));
         }
 
         Ok(session)
@@ -272,18 +274,23 @@ impl Session {
             .unwrap();
     }
 
+    /// Send heartbeats every few seconds to make sure we're up.
+    /// This function will never return Ok(()), but Result is used
+    /// to have the compiler warn about not using it.
     fn heartbeat_loop(
         chan: SyncSender<EventFrame>,
         delay: Duration
-    ) -> () {
+    ) -> Result<(), ()> {
         loop {
             thread::sleep(delay);
             trace!("Sending heartbeat");
-            chan.send(EventFrame::Frame(Frame {
+            if chan.send(EventFrame::Frame(Frame {
                 frame_type: FrameType::HEARTBEAT,
                 channel: 0,
                 payload: FramePayload::new(vec![]),
-            })).unwrap();
+            })).is_err() {
+                return Err(());
+            }
         }
     }
 
