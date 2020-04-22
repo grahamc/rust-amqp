@@ -75,6 +75,7 @@ pub struct Session {
     channels: Arc<Mutex<HashMap<u16, SyncSender<AMQPResult<Frame>>>>>,
     send_sender: SyncSender<EventFrame>,
     channel_max_limit: u16,
+    read_loop_thread: thread::JoinHandle<Result<(), ()>>,
     heartbeat: u16,
     heartbeat_thread: Option<thread::JoinHandle<Result<(), ()>>>,
     channel_zero: channel::Channel,
@@ -116,12 +117,13 @@ impl Session {
         let channel_zero = channel::Channel::new(0, channel_receiver, send_sender.clone());
         try!(channels.lock().map_err(|_| AMQPError::SyncError)).insert(0, channel_zero_sender);
         let channels_clone = channels.clone();
-        thread::spawn(|| Session::reading_loop(connection, channels_clone, send_receiver));
+        read_loop_thread = thread::spawn(|| Session::reading_loop(connection, channels_clone, send_receiver));
 
         let mut session = Session {
             channels: channels,
             send_sender: send_sender,
             channel_max_limit: 65535,
+            read_loop_thread: read_loop_thread,
             heartbeat: options.heartbeat,
             heartbeat_thread: None,
             channel_zero: channel_zero,
