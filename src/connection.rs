@@ -32,8 +32,8 @@ impl Connection {
         let mut tls_socket = try!(connector.connect(host, socket));
 
         try!(init_connection(&mut tls_socket));
-        socket.set_nonblocking(true).unwrap();
-        socket.set_read_timeout(Some(time::Duration::from_millis(250)));
+        tls_socket.get_mut().set_nonblocking(true).unwrap();
+        tls_socket.get_mut().set_read_timeout(Some(time::Duration::from_millis(250)));
         Ok(Connection {
             socket: AMQPStream::Tls(tls_socket),
             frame_max_limit: 131072,
