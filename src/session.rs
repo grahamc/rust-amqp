@@ -75,9 +75,7 @@ pub struct Session {
     channels: Arc<Mutex<HashMap<u16, SyncSender<AMQPResult<Frame>>>>>,
     send_sender: SyncSender<EventFrame>,
     channel_max_limit: u16,
-    read_loop_thread: thread::JoinHandle<Result<(), ()>>,
     heartbeat: u16,
-    heartbeat_thread: Option<thread::JoinHandle<Result<(), ()>>>,
     channel_zero: channel::Channel,
 }
 
@@ -116,30 +114,36 @@ impl Session {
         let (channel_zero_sender, channel_receiver) = sync_channel(CHANNEL_BUFFER_SIZE); //channel0
         let channel_zero = channel::Channel::new(0, channel_receiver, send_sender.clone());
         try!(channels.lock().map_err(|_| AMQPError::SyncError)).insert(0, channel_zero_sender);
-        let channels_clone = channels.clone();
-        read_loop_thread = thread::spawn(|| Session::reading_loop(connection, channels_clone, send_receiver));
+
+        let (heartbeat_dead_sender, heartbeat_dead_receiver) = sync_channel(CHANNEL_BUFFER_SIZE);
+        {
+            let sender = send_sender.clone();
+            let heartbeat = options.heartbeat;
+            Some(thread::spawn(move || {
+                Session::heartbeat_loop(
+                    sender,
+                    Duration::from_secs(heartbeat as u64)
+                );
+                heartbeat_dead_sender.send(());
+            }));
+        }
+
+        {
+            let channels_clone = channels.clone();
+            thread::spawn(|| Session::reading_loop(connection, channels_clone, send_receiver, heartbeat_dead_receiver));
+        }
 
         let mut session = Session {
             channels: channels,
             send_sender: send_sender,
             channel_max_limit: 65535,
-            read_loop_thread: read_loop_thread,
             heartbeat: options.heartbeat,
-            heartbeat_thread: None,
             channel_zero: channel_zero,
         };
 
         try!(session.init(options));
 
 
-        {
-            let sender = session.send_sender.clone();
-            let hb = Duration::from_secs(session.heartbeat.clone() as u64);
-            session.heartbeat_thread = Some(thread::spawn(move || Session::heartbeat_loop(
-                sender,
-                hb
-            )));
-        }
 
         Ok(session)
     }
@@ -300,12 +304,26 @@ impl Session {
     // channels.
     fn reading_loop(mut connection: Connection,
                     channels: Arc<Mutex<HashMap<u16, SyncSender<AMQPResult<Frame>>>>>,
-                    send_receiver: Receiver<EventFrame>
+                    send_receiver: Receiver<EventFrame>,
+                    heartbeat_died_receiver: Receiver<()>
     )
                     -> () {
         debug!("Starting reading loop");
         loop {
             trace!("Start of the read loop");
+
+            if heartbeat_died_receiver.try_recv().is_ok() {
+                warn!("Heartbeat failed");
+                let chans = channels.lock().unwrap();
+                for chan in chans.values() {
+                    // Propagate error to every channel, so they can close
+                    if chan.send(Err(AMQPError::HeartbeatDead)).is_err() {
+                        error!("Error dispatching closing packet to a channel");
+                    }
+                }
+                break;
+            }
+
             let mut sent = 0;
             while sent < 100 {
                 let recvd = send_receiver.try_recv();
@@ -314,7 +332,15 @@ impl Session {
                     match frame {
                         EventFrame::Frame(frame) => {
                             trace!("Writing frame: {:?}", frame);
-                            connection.write(frame).expect("failed to write frame");
+                            if let Err(e) = connection.write(frame) {
+                                let chans = channels.lock().unwrap();
+                                for chan in chans.values() {
+                                    // Propagate error to every channel, so they can close
+                                    if chan.send(Err(e.clone())).is_err() {
+                                        error!("Error dispatching closing packet to a channel");
+                                    }
+                                }
+                            }
                         }
                         EventFrame::FrameMaxLimit(limit) => {
                             trace!("Max frame limit: {:?}", limit);
