@@ -17,6 +17,7 @@ pub enum AMQPError {
     SyncError,
     FramingError(String),
     VHostError,
+    HeartbeatDead,
 }
 
 impl fmt::Display for AMQPError {
@@ -37,6 +38,7 @@ impl error::Error for AMQPError {
             AMQPError::SyncError => "Synchronisation error",
             AMQPError::FramingError(ref err) => err,
             AMQPError::VHostError => "Access to vhost is denied for a current user",
+            AMQPError::HeartbeatDead => "Heartbeat missed",
         }
     }
 }
